@@ -26,8 +26,26 @@ contract SimpleStakingPool is ReentrancyGuard {
     // Minimum amount to stake
     uint256 public minStake = 10 * 1e18;
 
+    // Compounding frequency limit in seconds
+    uint256 public compoundFreq = 86400; //24 hours
+
     // Mapping of address to Staker info
     mapping(address => Staker) internal stakers;
+
+    modifier rateLimit(address _account) {
+        uint256 remainingTime = compoundRewardsTimer(_account);
+
+        require(remainingTime == 0, "Too soon!");
+
+        _;
+    }
+
+    // Events
+    event Deposit(address indexed _from, uint256 _value);
+    event ClaimRewards(address indexed _from, uint256 _value);
+    event StakeRewards(address indexed _from, uint256 _value);
+    event Withdraw(address indexed _from, uint256 _value);
+    event Unstake(address indexed _from, uint256 _value);
 
     constructor(address _tokenAddress) {
         tokenAddress = IERC20(_tokenAddress);
@@ -36,7 +54,11 @@ contract SimpleStakingPool is ReentrancyGuard {
     // If address firstly stake, initiate one.
     // If address already stake,calculate unclaimedRewards, reset the last time of
     // deposit and then add _amount to the already deposited amount.
-    function deposit(uint256 _amount) external nonReentrant {
+    function deposit(uint256 _amount)
+        external
+        nonReentrant
+        rateLimit(msg.sender)
+    {
         require(_amount >= minStake, "Amount smaller than minimimum deposit");
 
         tokenAddress.safeTransferFrom(msg.sender, address(this), _amount);
@@ -53,13 +75,13 @@ contract SimpleStakingPool is ReentrancyGuard {
             stakers[msg.sender].timeOfLastUpdate = block.timestamp;
         }
 
-        // TODO: Emit a staking event
+        emit Deposit(msg.sender, _amount);
     }
 
-    // TODO: function stakeRewards() {}
-
-    function claimRewards() external nonReentrant {
-        uint256 rewards = calculateRewards(msg.sender) + stakers[msg.sender].unclaimedRewards;
+    // Get current unclaimed reward
+    function claimRewards() external nonReentrant rateLimit(msg.sender) {
+        uint256 rewards = calculateRewards(msg.sender) +
+            stakers[msg.sender].unclaimedRewards;
 
         require(rewards > 0, "You have no rewards");
 
@@ -68,10 +90,27 @@ contract SimpleStakingPool is ReentrancyGuard {
 
         tokenAddress.safeTransfer(msg.sender, rewards);
 
-        // TODO: Emit a claim event
+        emit ClaimRewards(msg.sender, rewards);
     }
 
-    function withdraw(uint256 _amount) external nonReentrant {
+    // Stake current unclaimed reward
+    function stakeRewards() external nonReentrant rateLimit(msg.sender) {
+        uint256 rewards = calculateRewards(msg.sender) +
+            stakers[msg.sender].unclaimedRewards;
+
+        require(rewards > 0, "You have no rewards");
+
+        this.deposit(rewards);
+
+        emit StakeRewards(msg.sender, rewards);
+    }
+
+    // Only withdraw amount you deposited
+    function withdraw(uint256 _amount)
+        external
+        nonReentrant
+        rateLimit(msg.sender)
+    {
         require(
             stakers[msg.sender].deposited >= _amount,
             "Can't withdraw more than you have"
@@ -85,23 +124,26 @@ contract SimpleStakingPool is ReentrancyGuard {
 
         tokenAddress.safeTransfer(msg.sender, _amount);
 
-        // TODO: Emit a withdraw event
+        emit Withdraw(msg.sender, _amount);
     }
 
-    function unstake() external nonReentrant {
+    // Withdraw both deposited and unclaimed reward
+    function unstake() external nonReentrant rateLimit(msg.sender) {
         require(stakers[msg.sender].deposited > 0, "You have no deposit");
 
-        uint256 _rewards = calculateRewards(msg.sender) + stakers[msg.sender].unclaimedRewards;
+        uint256 _rewards = calculateRewards(msg.sender) +
+            stakers[msg.sender].unclaimedRewards;
         uint256 _deposit = stakers[msg.sender].deposited;
 
         stakers[msg.sender].deposited = 0;
         stakers[msg.sender].timeOfLastUpdate = 0;
+        stakers[msg.sender].unclaimedRewards = 0;
 
         uint256 _amount = _rewards + _deposit;
 
         tokenAddress.safeTransfer(msg.sender, _amount);
 
-        // TODO: Emit a unstake event
+        emit Unstake(msg.sender, _amount);
     }
 
     function getDepositInfo(address _user)
@@ -110,17 +152,38 @@ contract SimpleStakingPool is ReentrancyGuard {
         returns (uint256 _stake, uint256 _rewards)
     {
         _stake = stakers[_user].deposited;
-        _rewards = calculateRewards(_user) + stakers[msg.sender].unclaimedRewards;
+        _rewards =
+            calculateRewards(_user) +
+            stakers[msg.sender].unclaimedRewards;
 
         return (_stake, _rewards);
     }
 
+    //  Returns the timer for restaking rewards
+    function compoundRewardsTimer(address _account)
+        public
+        view
+        returns (uint256 _timer)
+    {
+        if (
+            stakers[_account].timeOfLastUpdate + compoundFreq <= block.timestamp
+        ) {
+            return 0;
+        } else {
+            return
+                (stakers[_account].timeOfLastUpdate + compoundFreq) -
+                block.timestamp;
+        }
+    }
 
     function calculateRewards(address _staker)
         internal
         view
         returns (uint256 rewards)
     {
-        return ((block.timestamp - stakers[_staker].timeOfLastUpdate) * stakers[_staker].deposited * APR) / (365 * 24* 3600);
+        return
+            ((block.timestamp - stakers[_staker].timeOfLastUpdate) *
+                stakers[_staker].deposited *
+                APR) / (365 * 24 * 3600 * 100);
     }
 }
